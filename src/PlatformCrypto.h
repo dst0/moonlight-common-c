@@ -58,6 +58,17 @@ bool PltEncryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
                        unsigned char* inputData, int inputDataLength,
                        unsigned char* outputData, int* outputDataLength);
 
+// AES-128-GCM encryption with additional authenticated data (AAD). The AAD is
+// authenticated but not encrypted. The IV length must stay the same for every
+// call on a given context. Used by the secure-desktop-stream microphone stream.
+bool PltEncryptMessageAead(PPLT_CRYPTO_CONTEXT ctx,
+                           unsigned char* key, int keyLength,
+                           unsigned char* iv, int ivLength,
+                           const unsigned char* aad, int aadLength,
+                           unsigned char* tag, int tagLength,
+                           const unsigned char* inputData, int inputDataLength,
+                           unsigned char* outputData, int* outputDataLength);
+
 bool PltDecryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
                        unsigned char replayWindowIndex,
                        unsigned int sequenceNumber,

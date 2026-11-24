@@ -17,6 +17,10 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ${CMAKE_POSITION_INDEPENDENT_CODE_BACKUP})
 unset(CMAKE_POSITION_INDEPENDENT_CODE_BACKUP)
 
 aux_source_directory(src SRC_LIST)
+# secure-desktop-stream: the STUN client (SimpleStun.c) and the Internet connection tester
+# (ConnectionTester.c) were removed so the library never contacts servers outside the LAN.
+# Keep them out of the build even if an upstream merge brings the files back.
+list(REMOVE_ITEM SRC_LIST src/SimpleStun.c src/ConnectionTester.c)
 list(APPEND SRC_LIST
   nanors/rs.c
   nanors/deps/obl/oblas_common.c
@@ -87,3 +91,31 @@ target_include_directories(moonlight-common-c SYSTEM PRIVATE
 )
 
 target_compile_definitions(moonlight-common-c PRIVATE HAS_SOCKLEN_T)
+
+# secure-desktop-stream: microphone framing test (OpenSSL builds only)
+option(MOONLIGHT_COMMON_C_BUILD_SDS_TESTS "Build the secure-desktop-stream microphone framing test" OFF)
+if(MOONLIGHT_COMMON_C_BUILD_SDS_TESTS AND NOT USE_MBEDTLS)
+  add_executable(moonlight-common-c-sds-mic-test
+    tests/sds_mic_test.c
+    src/SdsMicPacket.c
+    src/PlatformCrypto.c
+  )
+  target_include_directories(moonlight-common-c-sds-mic-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/enet/include
+    ${OPENSSL_INCLUDE_DIR}
+  )
+  target_link_libraries(moonlight-common-c-sds-mic-test PRIVATE ${OPENSSL_CRYPTO_LIBRARY})
+  enable_testing()
+  add_test(NAME sds-mic-framing COMMAND moonlight-common-c-sds-mic-test)
+
+  add_executable(moonlight-common-c-sds-hardening-test
+    tests/sds_hardening_test.c
+  )
+  target_link_libraries(moonlight-common-c-sds-hardening-test PRIVATE moonlight-common-c enet ${OPENSSL_CRYPTO_LIBRARY})
+  target_include_directories(moonlight-common-c-sds-hardening-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/enet/include
+  )
+  add_test(NAME sds-hardening COMMAND moonlight-common-c-sds-hardening-test)
+endif()

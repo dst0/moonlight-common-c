@@ -595,6 +595,118 @@ bool PltDecryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
 #endif
 }
 
+bool PltEncryptMessageAead(PPLT_CRYPTO_CONTEXT ctx,
+                           unsigned char* key, int keyLength,
+                           unsigned char* iv, int ivLength,
+                           const unsigned char* aad, int aadLength,
+                           unsigned char* tag, int tagLength,
+                           const unsigned char* inputData, int inputDataLength,
+                           unsigned char* outputData, int* outputDataLength) {
+    if (ctx == NULL || key == NULL || keyLength != 16 ||
+            iv == NULL || ivLength <= 0 || tag == NULL || tagLength <= 0 ||
+            aadLength < 0 || (aadLength > 0 && aad == NULL) ||
+            inputDataLength < 0 || (inputDataLength > 0 && inputData == NULL) ||
+            outputData == NULL || outputDataLength == NULL) {
+        return false;
+    }
+
+#ifdef USE_PSA_CRYPTO
+    if (!ctx->initialized) {
+        if (psa_crypto_init() != PSA_SUCCESS) {
+            return false;
+        }
+
+        psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+        psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+        psa_set_key_bits(&attributes, keyLength * 8);
+        psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_ENCRYPT);
+        psa_set_key_algorithm(&attributes, PSA_ALG_GCM);
+
+        if (psa_import_key(&attributes, key, keyLength, &ctx->key) != PSA_SUCCESS) {
+            psa_reset_key_attributes(&attributes);
+            return false;
+        }
+
+        psa_reset_key_attributes(&attributes);
+        ctx->initialized = true;
+    }
+
+    psa_aead_operation_t aeadOp = PSA_AEAD_OPERATION_INIT;
+    if (psa_aead_encrypt_setup(&aeadOp, ctx->key, PSA_ALG_GCM) != PSA_SUCCESS) {
+        return false;
+    }
+
+    if (psa_aead_set_lengths(&aeadOp, aadLength, inputDataLength) != PSA_SUCCESS ||
+            psa_aead_set_nonce(&aeadOp, iv, ivLength) != PSA_SUCCESS ||
+            (aadLength > 0 && psa_aead_update_ad(&aeadOp, aad, aadLength) != PSA_SUCCESS)) {
+        psa_aead_abort(&aeadOp);
+        return false;
+    }
+
+    size_t outLen = 0;
+    if (inputDataLength > 0 &&
+            psa_aead_update(&aeadOp, inputData, inputDataLength, outputData, inputDataLength, &outLen) != PSA_SUCCESS) {
+        psa_aead_abort(&aeadOp);
+        return false;
+    }
+
+    size_t finishLen = 0;
+    size_t tagOutLen = 0;
+    if (psa_aead_finish(&aeadOp, outputData + outLen, inputDataLength - outLen, &finishLen, tag, tagLength, &tagOutLen) != PSA_SUCCESS) {
+        psa_aead_abort(&aeadOp);
+        return false;
+    }
+
+    if (tagOutLen != (size_t)tagLength) {
+        return false;
+    }
+
+    *outputDataLength = (int)(outLen + finishLen);
+    return true;
+#else
+    int len;
+
+    if (keyLength != 16) {
+        return false;
+    }
+
+    if (!ctx->initialized) {
+        if (EVP_EncryptInit_ex(ctx->ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1 ||
+                EVP_CIPHER_CTX_ctrl(ctx->ctx, EVP_CTRL_GCM_SET_IVLEN, ivLength, NULL) != 1 ||
+                EVP_EncryptInit_ex(ctx->ctx, NULL, NULL, key, iv) != 1) {
+            return false;
+        }
+
+        ctx->initialized = true;
+    }
+    else if (EVP_EncryptInit_ex(ctx->ctx, NULL, NULL, NULL, iv) != 1) {
+        // Calling with cipher == NULL changes only the IV without reallocating the context
+        return false;
+    }
+
+    if (aadLength > 0 && EVP_EncryptUpdate(ctx->ctx, NULL, &len, aad, aadLength) != 1) {
+        return false;
+    }
+
+    *outputDataLength = 0;
+    if (inputDataLength > 0 && EVP_EncryptUpdate(ctx->ctx, outputData, outputDataLength, inputData, inputDataLength) != 1) {
+        return false;
+    }
+
+    // GCM encryption won't ever fill ciphertext here but we have to call it anyway
+    if (EVP_EncryptFinal_ex(ctx->ctx, outputData + *outputDataLength, &len) != 1) {
+        return false;
+    }
+    *outputDataLength += len;
+
+    if (EVP_CIPHER_CTX_ctrl(ctx->ctx, EVP_CTRL_GCM_GET_TAG, tagLength, tag) != 1) {
+        return false;
+    }
+
+    return true;
+#endif
+}
+
 PPLT_CRYPTO_CONTEXT PltCreateCryptoContext(unsigned char replayWindowCount) {
     PPLT_CRYPTO_CONTEXT ctx = calloc(1, sizeof(*ctx) + (replayWindowCount * sizeof(REPLAY_WINDOW)));
     if (!ctx) {

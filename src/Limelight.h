@@ -100,6 +100,12 @@ typedef struct _STREAM_CONFIGURATION {
     // in /launch and /resume requests.
     char remoteInputAesKey[16];
     char remoteInputAesIv[16];
+
+    // secure-desktop-stream: request the encrypted microphone stream. It is only set up
+    // when the host advertises LI_FF_SDS_MIC in its feature flags; if the host lacks support
+    // or the RTSP SETUP for it fails, the connection continues without a microphone.
+    // Send audio with LiSendMicrophoneOpusData() once the connection has started.
+    bool enableMicrophone;
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
 // Use this function to zero the stream configuration when allocated on the stack or heap
@@ -863,12 +869,6 @@ uint64_t LiGetMicroseconds(void);
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMillis(void);
 
-// This is a simplistic STUN function that can assist clients in getting the WAN address
-// for machines they find using mDNS over IPv4. This can be used to pre-populate the external
-// address for streaming after GFE stopped sending it a while back. wanAddr is returned in
-// network byte order.
-int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, unsigned int* wanAddr);
-
 // Returns the number of queued video frames ready for delivery. Only relevant
 // if CAPABILITY_DIRECT_SUBMIT is not set for the video renderer.
 int LiGetPendingVideoFrames(void);
@@ -920,7 +920,7 @@ void LiGetRTPVideoStats(PRTP_VIDEO_STATS stats);
 #define ML_PORT_INDEX_UDP_48000 10
 #define ML_PORT_INDEX_UDP_48010 11
 
-// Port flags for use with LiTestClientConnectivity()
+// Port flags for use with LiGetPortFlagsFromStage() and LiStringifyPortFlags()
 #define ML_PORT_FLAG_ALL       0xFFFFFFFF
 #define ML_PORT_FLAG_TCP_47984 0x0001
 #define ML_PORT_FLAG_TCP_47989 0x0002
@@ -949,19 +949,8 @@ unsigned short LiGetPortFromPortFlagIndex(int portFlagIndex);
 // If the output buffer is too small, the output will be truncated to fit the provided buffer.
 void LiStringifyPortFlags(unsigned int portFlags, const char* separator, char* outputBuffer, int outputBufferLength);
 
-// This function may be used to test if the local network is blocking Moonlight's ports. It requires
-// a test server running on an Internet-reachable host. To perform a test, pass in the DNS hostname
-// of the test server, a reference TCP port to ensure the test host is reachable at all (something
-// very unlikely to blocked, like 80 or 443), and a set of ML_PORT_FLAG_* values corresponding to
-// the ports you'd like to test. On return, it returns ML_TEST_RESULT_INCONCLUSIVE on catastrophic error,
-// or the set of port flags that failed to validate. If all ports validate successfully, it returns 0.
-//
-// It's encouraged to not use the port flags explicitly (because GameStream ports may change in the future),
-// but to instead use ML_PORT_FLAG_ALL or LiGetPortFlagsFromStage() on connection failure.
-//
-// The test server is available at https://github.com/cgutman/gfe-loopback
-#define ML_TEST_RESULT_INCONCLUSIVE 0xFFFFFFFF
-unsigned int LiTestClientConnectivity(const char* testServer, unsigned short referencePort, unsigned int testPortFlags);
+// LiTestClientConnectivity() (Internet connection tester) and LiFindExternalAddressIP4() (STUN)
+// were removed from this fork: the library must never contact servers outside the LAN.
 
 // This family of functions can be used for pull-based video renderers that opt to manage a decoding/rendering
 // thread themselves. After successfully calling the WaitFor/Poll variants that dequeue the video frame, you
@@ -1017,7 +1006,22 @@ void LiRequestIdrFrame(void);
 // This function returns any extended feature flags supported by the host.
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported
 #define LI_FF_CONTROLLER_TOUCH_EVENTS 0x02 // LiSendControllerTouchEvent() supported
+#define LI_FF_SDS_MIC                 0x10000000 // secure-desktop-stream microphone passthrough
 uint32_t LiGetHostFeatureFlags(void);
+
+// secure-desktop-stream microphone passthrough (client -> host).
+//
+// Returns true while the microphone stream negotiated for the current connection is running
+// (STREAM_CONFIGURATION.enableMicrophone was set, the host advertised LI_FF_SDS_MIC and the
+// RTSP SETUP streamid=mic succeeded).
+bool LiIsMicrophoneStreamActive(void);
+
+// Sends one Opus frame (48 kHz, mono, 20 ms, at most 1372 bytes) to the host, encrypted with
+// AES-128-GCM under the session's remote input key. Thread-safe and non-blocking (no waiting
+// beyond a short internal lock). Frames are dropped when no microphone stream is running:
+// returns 0 on success, LI_ERR_UNSUPPORTED when no microphone stream is running, and a
+// negative value for invalid arguments or send failures.
+int LiSendMicrophoneOpusData(const unsigned char* opusData, int opusLength);
 
 #ifdef __cplusplus
 }

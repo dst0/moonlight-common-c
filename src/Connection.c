@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "SdsMic.h"
 
 static int stage = STAGE_NONE;
 static ConnListenerConnectionTerminated originalTerminationCallback;
@@ -65,6 +66,14 @@ void LiInterruptConnection(void) {
     ConnectionInterrupted = true;
 }
 
+static void secureZeroMemory(void* ptr, size_t len)
+{
+    volatile unsigned char* p = (volatile unsigned char*)ptr;
+    while (len--) {
+        *p++ = 0;
+    }
+}
+
 // Stop the connection by undoing the step at the current stage and those before it
 void LiStopConnection(void) {
     // Disable termination callbacks now
@@ -72,6 +81,10 @@ void LiStopConnection(void) {
 
     // Set the interrupted flag
     LiInterruptConnection();
+
+    // secure-desktop-stream: the microphone stream lives outside the stage machine
+    // (it is optional and never fails a connection). Safe to call when never started.
+    stopMicStream();
 
     if (stage == STAGE_INPUT_STREAM_START) {
         Limelog("Stopping input stream...");
@@ -141,6 +154,9 @@ void LiStopConnection(void) {
         free(RemoteAddrString);
         RemoteAddrString = NULL;
     }
+
+    secureZeroMemory(StreamConfig.remoteInputAesKey, sizeof(StreamConfig.remoteInputAesKey));
+    secureZeroMemory(StreamConfig.remoteInputAesIv, sizeof(StreamConfig.remoteInputAesIv));
 }
 
 static void terminationCallbackThreadFunc(void* context)
@@ -271,6 +287,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     VideoPortNumber = 0;
     ControlPortNumber = 0;
     AudioPortNumber = 0;
+    initializeMicStream();
 
     // Parse RTSP port number from RTSP session URL
     if (!parseRtspPortNumberFromUrl(serverInfo->rtspSessionUrl, &RtspPortNumber)) {
@@ -535,6 +552,12 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     ListenerCallbacks.stageComplete(STAGE_INPUT_STREAM_START);
     Limelog("done\n");
     
+    // secure-desktop-stream: start the optional microphone stream. Failure only disables
+    // the microphone for this connection.
+    if (MicStreamNegotiated && startMicStream() != 0) {
+        Limelog("Continuing without microphone\n");
+    }
+
     // Wiggle the mouse a bit to wake the display up
     LiSendMouseMoveEvent(1, 1);
     PltSleepMs(10);

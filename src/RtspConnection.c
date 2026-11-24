@@ -1,5 +1,8 @@
 #include "Limelight-internal.h"
 #include "Rtsp.h"
+#include "SdsMic.h"
+
+#include <errno.h>
 
 #define RTSP_CONNECT_TIMEOUT_SEC 10
 #define RTSP_RECEIVE_TIMEOUT_SEC 15
@@ -661,6 +664,14 @@ static bool sendVideoAnnounce(PRTSP_MESSAGE response, int* error) {
         request.flags |= FLAG_ALLOCATED_PAYLOAD;
         request.payloadLength = payloadLength;
 
+        if ((IS_SUNSHINE() || AppVersionQuad[0] >= 7 || encryptedRtspEnabled) &&
+                ((EncryptionFeaturesEnabled & (SS_ENC_CONTROL_V2 | SS_ENC_VIDEO | SS_ENC_AUDIO)) !=
+                 (SS_ENC_CONTROL_V2 | SS_ENC_VIDEO | SS_ENC_AUDIO) || !AudioEncryptionEnabled)) {
+            Limelog("Refusing RTSP ANNOUNCE without full stream encryption (enabled=0x%x, audio=%d)\n",
+                    EncryptionFeaturesEnabled, AudioEncryptionEnabled ? 1 : 0);
+            goto FreeMessage;
+        }
+
         snprintf(payloadLengthStr, sizeof(payloadLengthStr), "%d", payloadLength);
         if (!addOption(&request, "Content-length", payloadLengthStr)) {
             goto FreeMessage;
@@ -719,6 +730,7 @@ static int parseOpusConfigFromParamString(char* paramStr, int channelCount, POPU
 static bool parseServerPortFromTransport(PRTSP_MESSAGE response, uint16_t* port) {
     char* transport;
     char* portStart;
+    char* endptr;
 
     transport = getOptionContent(response->options, "Transport");
     if (transport == NULL) {
@@ -733,10 +745,16 @@ static bool parseServerPortFromTransport(PRTSP_MESSAGE response, uint16_t* port)
 
     // Skip the prefix
     portStart += strlen("server_port=");
+    if (*portStart < '0' || *portStart > '9') {
+        return false;
+    }
 
     // Validate the port number
-    long int rawPort = strtol(portStart, NULL, 10);
-    if (rawPort <= 0 || rawPort > 65535) {
+    errno = 0;
+    long int rawPort = strtol(portStart, &endptr, 10);
+    if (errno != 0 || endptr == portStart ||
+            (*endptr != '\0' && *endptr != ';' && *endptr != '\r' && *endptr != '\n' && *endptr != ' ') ||
+            rawPort < 1024 || rawPort > 65535) {
         return false;
     }
 
@@ -940,6 +958,43 @@ bool parseSdpAttributeToInt(const char* payload, const char* name, int* val) {
     return true;
 }
 
+// secure-desktop-stream: set up the optional microphone stream (DESIGN.md section 7.1).
+// Only called when the user enabled the microphone and the host advertised LI_FF_SDS_MIC.
+// Any failure leaves the microphone disabled and never fails the RTSP handshake.
+static void setupMicrophoneStream(void) {
+    RTSP_MESSAGE response;
+    int error = -1;
+    char* pingPayload;
+    uint16_t port = 0;
+
+    if (!setupStream(&response, "streamid=mic/0/0", &error)) {
+        Limelog("RTSP SETUP streamid=mic request failed: %d (continuing without microphone)\n", error);
+        return;
+    }
+
+    if (response.message.response.statusCode != 200) {
+        Limelog("RTSP SETUP streamid=mic failed: %d (continuing without microphone)\n",
+                response.message.response.statusCode);
+    }
+    else {
+        pingPayload = getOptionContent(response.options, "X-SS-Ping-Payload");
+        if (!parseServerPortFromTransport(&response, &port) ||
+                pingPayload == NULL || strlen(pingPayload) != sizeof(MicPingPayload.payload)) {
+            // Unlike audio/video there is no well-known fallback: without the ping payload
+            // the host cannot bind our endpoint, so the microphone stays off.
+            Limelog("RTSP SETUP streamid=mic response is malformed (continuing without microphone)\n");
+        }
+        else {
+            memcpy(MicPingPayload.payload, pingPayload, sizeof(MicPingPayload.payload));
+            MicPortNumber = port;
+            MicStreamNegotiated = true;
+            Limelog("Microphone port: %u\n", MicPortNumber);
+        }
+    }
+
+    freeMessage(&response);
+}
+
 // Perform RTSP Handshake with the streaming server machine as part of the connection process
 int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     int ret;
@@ -952,7 +1007,16 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     hasSessionId = false;
     controlStreamId = APP_VERSION_AT_LEAST(7, 1, 431) ? "streamid=control/13/0" : "streamid=control/1/0";
     AudioEncryptionEnabled = false;
-    encryptedRtspEnabled = serverInfo->rtspSessionUrl && strstr(serverInfo->rtspSessionUrl, "rtspenc://");
+    encryptedRtspEnabled = serverInfo->rtspSessionUrl != NULL &&
+            strncmp(serverInfo->rtspSessionUrl, "rtspenc://", strlen("rtspenc://")) == 0;
+    if (!encryptedRtspEnabled) {
+        Limelog("Refusing plaintext RTSP handshake: encrypted RTSP (rtspenc://) is required\n");
+        return -1;
+    }
+    if (useEnet) {
+        Limelog("Refusing RTSP over ENet because encrypted RTSP over TCP is required\n");
+        return -1;
+    }
     encryptionSequenceNumber = 0;
     encryptionCtx = PltCreateCryptoContext(0);
     decryptionCtx = PltCreateCryptoContext(1);
@@ -1329,6 +1393,18 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
 
         freeMessage(&response);
+    }
+
+    // secure-desktop-stream: the microphone stream must be set up before ANNOUNCE, which
+    // makes the host allocate the stream session. Stock hosts never see this SETUP because
+    // they do not advertise LI_FF_SDS_MIC.
+    if (StreamConfig.enableMicrophone) {
+        if (IS_SUNSHINE() && (SunshineFeatureFlags & LI_FF_SDS_MIC)) {
+            setupMicrophoneStream();
+        }
+        else {
+            Limelog("Microphone passthrough requested, but the host does not offer it\n");
+        }
     }
 
     {
