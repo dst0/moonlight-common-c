@@ -106,6 +106,11 @@ typedef struct _STREAM_CONFIGURATION {
     // or the RTSP SETUP for it fails, the connection continues without a microphone.
     // Send audio with LiSendMicrophoneOpusData() once the connection has started.
     bool enableMicrophone;
+
+    // secure-desktop-stream: true bit-exact SDLL v1 lossless video mode carried over
+    // the upgraded mTLS channel rather than RTP/FFmpeg. When true, VideoReceiveThreadProc
+    // keeps UDP pings alive and disables the no-RTP-traffic timeout.
+    bool sdsLosslessVideo;
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
 // Use this function to zero the stream configuration when allocated on the stack or heap

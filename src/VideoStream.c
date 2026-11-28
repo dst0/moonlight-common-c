@@ -146,7 +146,8 @@ static void VideoReceiveThreadProc(void* context) {
             break;
         }
         else if  (err == 0) {
-            if (!atomic_load_explicit(&receivedDataFromPeer, memory_order_relaxed)) {
+            if (!StreamConfig.sdsLosslessVideo &&
+                !atomic_load_explicit(&receivedDataFromPeer, memory_order_relaxed)) {
                 // If we wait many seconds without ever receiving a video packet,
                 // assume something is broken and terminate the connection.
                 waitingForVideoMs += UDP_RECV_POLL_TIMEOUT_MS;
@@ -278,7 +279,8 @@ int readFirstFrame(void) {
 
 // Terminate the video stream
 void stopVideoStream(void) {
-    if (!atomic_load_explicit(&receivedDataFromPeer, memory_order_relaxed)) {
+    if (!StreamConfig.sdsLosslessVideo &&
+        !atomic_load_explicit(&receivedDataFromPeer, memory_order_relaxed)) {
         Limelog("No video traffic was ever received from the host!\n");
     }
 
