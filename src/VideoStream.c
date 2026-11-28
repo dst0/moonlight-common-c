@@ -162,6 +162,12 @@ static void VideoReceiveThreadProc(void* context) {
             continue;
         }
 
+        if (StreamConfig.sdsLosslessVideo) {
+            // In SDS lossless mode, video frames are delivered over the upgraded TLS stream.
+            // Ignore any stray UDP traffic so it cannot arm firstDataTimeMs or trigger ML_ERROR_NO_VIDEO_FRAME.
+            continue;
+        }
+
         if (!atomic_exchange_explicit(&receivedDataFromPeer, true, memory_order_relaxed)) {
             Limelog("Received first video packet after %d ms\n", waitingForVideoMs);
 
